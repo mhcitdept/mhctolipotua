@@ -4,36 +4,23 @@ param(
 
     [Parameter(Mandatory = $false)] [string]$TransmitDir = "transmit",
     [Parameter(Mandatory = $false)] [string]$ResponseDir = "responses",
-    [Parameter(Mandatory = $false)] [string]$UploadResponseDir = "upload_responses",
+    [Parameter(Mandatory = $false)] [string]$UploadResponseDir = "responses",
     [Parameter(Mandatory = $false)] [string]$CompletedDir = "completed",
     [Parameter(Mandatory = $false)] [string]$LogDir = "logs",
 
-    [Parameter(Mandatory = $false)] [string]$DateFormat = "yyyyMMdd",
+    # Choose which timestamp to use for ordering
+    [Parameter(Mandatory = $false)] [ValidateSet('CreationTime','LastWriteTime')] [string]$OrderByTimeField = 'CreationTime',
 
-    # Allows testing for a specific date (e.g., '20250104'). When empty, uses today.
-    [Parameter(Mandatory = $false)] [string]$TodayOverride = "",
+    # Suffix patterns to distinguish types (wildcards supported)
+    [Parameter(Mandatory = $false)] [string]$ConfirmationSuffixFilter = '*.030001.x12',
+    [Parameter(Mandatory = $false)] [string]$ResultSuffixFilter = '*.100001.x12',
 
     # External commands to run for upload and download (e.g., paths to .bat files). Optional.
     [Parameter(Mandatory = $false)] [string]$UploadCommand = "",
     [Parameter(Mandatory = $false)] [string]$DownloadCommand = "",
 
     # Optional command to run after a successful download (e.g., your CSV copy step)
-    [Parameter(Mandatory = $false)] [string]$PostDownloadCommand = "",
-
-    # Detection modes for today's files: NameContainsStamp or CreatedDate
-    [Parameter(Mandatory = $false)] [ValidateSet('NameContainsStamp','CreatedDate')] [string]$ResponseTodayMode = 'NameContainsStamp',
-    [Parameter(Mandatory = $false)] [ValidateSet('NameContainsStamp','CreatedDate')] [string]$UploadResponseTodayMode = 'NameContainsStamp',
-
-    # When using CreatedDate mode, choose which timestamp field to use
-    [Parameter(Mandatory = $false)] [ValidateSet('CreationTime','LastWriteTime')] [string]$TodayMatchTimeField = 'CreationTime',
-
-    # Filters when using CreatedDate mode
-    [Parameter(Mandatory = $false)] [string]$ResponseExtFilter = '*.x12',
-    [Parameter(Mandatory = $false)] [Nullable[long]]$ResponseMinSizeBytesForTodayMatch = $null,
-    [Parameter(Mandatory = $false)] [Nullable[long]]$ResponseMaxSizeBytesForTodayMatch = $null,
-    [Parameter(Mandatory = $false)] [string]$UploadResponseExtFilter = '*',
-    [Parameter(Mandatory = $false)] [Nullable[long]]$UploadResponseMinSizeBytesForTodayMatch = $null,
-    [Parameter(Mandatory = $false)] [Nullable[long]]$UploadResponseMaxSizeBytesForTodayMatch = $null
+    [Parameter(Mandatory = $false)] [string]$PostDownloadCommand = ""
 )
 
 Set-StrictMode -Version Latest
@@ -61,53 +48,6 @@ function Write-Log {
     }
 }
 
-function Get-TodayStamp {
-    param(
-        [Parameter(Mandatory = $true)] [string]$Format,
-        [Parameter(Mandatory = $false)] [string]$Override = ""
-    )
-    if ([string]::IsNullOrWhiteSpace($Override)) { return (Get-Date).ToString($Format) }
-    return $Override
-}
-
-function Test-HasFileWithStamp {
-    param(
-        [Parameter(Mandatory = $true)] [string]$DirectoryPath,
-        [Parameter(Mandatory = $true)] [string]$Stamp
-    )
-    if (-not (Test-Path -Path $DirectoryPath)) { return $false }
-    $match = Get-ChildItem -Path $DirectoryPath -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "*${Stamp}*" } |
-        Select-Object -First 1
-    return [bool]$match
-}
-
-function Test-HasTodayFileByCreatedDate {
-    [CmdletBinding()] param(
-        [Parameter(Mandatory = $true)] [string]$DirectoryPath,
-        [Parameter(Mandatory = $true)] [datetime]$TodayDate,
-        [Parameter(Mandatory = $false)] [string]$Filter = '*',
-        [Parameter(Mandatory = $false)] [Nullable[long]]$MinSizeBytes = $null,
-        [Parameter(Mandatory = $false)] [Nullable[long]]$MaxSizeBytes = $null,
-        [Parameter(Mandatory = $false)] [ValidateSet('CreationTime','LastWriteTime')] [string]$TimeField = 'CreationTime'
-    )
-    if (-not (Test-Path -Path $DirectoryPath)) { return $false }
-    $files = Get-ChildItem -Path $DirectoryPath -File -Filter $Filter -ErrorAction SilentlyContinue
-    if ($TimeField -eq 'LastWriteTime') {
-        $files = $files | Where-Object { $_.LastWriteTime.Date -eq $TodayDate.Date }
-    }
-    else {
-        $files = $files | Where-Object { $_.CreationTime.Date -eq $TodayDate.Date }
-    }
-    if ($MinSizeBytes -ne $null) {
-        $files = $files | Where-Object { $_.Length -ge $MinSizeBytes }
-    }
-    if ($MaxSizeBytes -ne $null) {
-        $files = $files | Where-Object { $_.Length -le $MaxSizeBytes }
-    }
-    return [bool]($files | Select-Object -First 1)
-}
-
 function Invoke-ExternalCommandViaCmd {
     [CmdletBinding()] param(
         [Parameter(Mandatory = $true)] [string]$CommandLine
@@ -115,6 +55,33 @@ function Invoke-ExternalCommandViaCmd {
     Write-Log -Message "Executing: $CommandLine" -Level 'DEBUG'
     $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $CommandLine) -Wait -PassThru -WindowStyle Hidden
     return ($proc.ExitCode -eq 0)
+}
+
+function Get-LatestFileMatching {
+    [CmdletBinding()] param(
+        [Parameter(Mandatory = $true)] [string]$DirectoryPath,
+        [Parameter(Mandatory = $true)] [string]$Filter,
+        [Parameter(Mandatory = $false)] [ValidateSet('CreationTime','LastWriteTime')] [string]$TimeField = 'CreationTime'
+    )
+    if (-not (Test-Path -Path $DirectoryPath)) { return $null }
+    $files = Get-ChildItem -Path $DirectoryPath -File -Filter $Filter -ErrorAction SilentlyContinue
+    if (-not $files) { return $null }
+    if ($TimeField -eq 'LastWriteTime') {
+        return ($files | Sort-Object -Property LastWriteTime, Name | Select-Object -Last 1)
+    }
+    else {
+        return ($files | Sort-Object -Property CreationTime, Name | Select-Object -Last 1)
+    }
+}
+
+function Get-FileTimeValue {
+    param(
+        [Parameter(Mandatory = $true)] [System.IO.FileInfo]$FileInfo,
+        [Parameter(Mandatory = $true)] [ValidateSet('CreationTime','LastWriteTime')] [string]$TimeField
+    )
+    if ($null -eq $FileInfo) { return $null }
+    if ($TimeField -eq 'LastWriteTime') { return $FileInfo.LastWriteTime }
+    return $FileInfo.CreationTime
 }
 
 function Invoke-EligibilityUpload {
@@ -168,11 +135,9 @@ function Move-OldFilesToCompleted {
         [Parameter(Mandatory = $true)] [string]$TransmitPath,
         [Parameter(Mandatory = $true)] [string]$ResponsePath,
         [Parameter(Mandatory = $true)] [string]$CompletedPath,
-        [Parameter(Mandatory = $true)] [string]$TodayStamp,
-        [Parameter(Mandatory = $true)] [datetime]$TodayDate
+        [Parameter(Mandatory = $true)] [System.Collections.Generic.HashSet[string]]$KeepFullPaths
     )
 
-    # Create a dated archive folder under completed
     $archiveRoot = Join-Path $CompletedPath (Get-Date -Format 'yyyyMMdd_HHmmss')
     $archiveTransmit = Join-Path $archiveRoot 'transmit'
     $archiveResponse = Join-Path $archiveRoot 'responses'
@@ -183,26 +148,28 @@ function Move-OldFilesToCompleted {
     $movedCount = 0
 
     if (Test-Path -Path $TransmitPath) {
-        $toArchiveTx = Get-ChildItem -Path $TransmitPath -File -ErrorAction SilentlyContinue |
-            Where-Object { ($_.Name -notlike "*${TodayStamp}*") -and ($_.CreationTime.Date -ne $TodayDate.Date) }
+        $toArchiveTx = Get-ChildItem -Path $TransmitPath -File -ErrorAction SilentlyContinue
         foreach ($file in $toArchiveTx) {
-            $dest = Join-Path $archiveTransmit $file.Name
-            Move-Item -Path $file.FullName -Destination $dest -Force
-            $movedCount++
+            if (-not $KeepFullPaths.Contains($file.FullName)) {
+                $dest = Join-Path $archiveTransmit $file.Name
+                Move-Item -Path $file.FullName -Destination $dest -Force
+                $movedCount++
+            }
         }
     }
 
     if (Test-Path -Path $ResponsePath) {
-        $toArchiveResp = Get-ChildItem -Path $ResponsePath -File -ErrorAction SilentlyContinue |
-            Where-Object { ($_.Name -notlike "*${TodayStamp}*") -and ($_.CreationTime.Date -ne $TodayDate.Date) }
+        $toArchiveResp = Get-ChildItem -Path $ResponsePath -File -ErrorAction SilentlyContinue
         foreach ($file in $toArchiveResp) {
-            $dest = Join-Path $archiveResponse $file.Name
-            Move-Item -Path $file.FullName -Destination $dest -Force
-            $movedCount++
+            if (-not $KeepFullPaths.Contains($file.FullName)) {
+                $dest = Join-Path $archiveResponse $file.Name
+                Move-Item -Path $file.FullName -Destination $dest -Force
+                $movedCount++
+            }
         }
     }
 
-    Write-Log -Message "Archived $movedCount file(s) to $archiveRoot (excluding today's transmit/response)."
+    Write-Log -Message "Archived $movedCount file(s) to $archiveRoot (keeping latest transmit/confirm/result)."
 }
 
 # Resolve and ensure directories
@@ -221,53 +188,58 @@ Initialize-DirectoryIfMissing -PathToEnsure $ResolvedLogDir
 # Prepare logging
 $script:LogFile = Join-Path $ResolvedLogDir ("eligibility_" + (Get-Date -Format 'yyyyMMdd') + ".log")
 Write-Log -Message "Starting eligibility run. Root: $RootDir"
+Write-Log -Message "Time field for ordering: $OrderByTimeField; Confirm filter: $ConfirmationSuffixFilter; Result filter: $ResultSuffixFilter" -Level 'DEBUG'
 
-$todayStamp = Get-TodayStamp -Format $DateFormat -Override $TodayOverride
-$todayDate = if ([string]::IsNullOrWhiteSpace($TodayOverride)) { Get-Date } else { [datetime]::ParseExact($TodayOverride, $DateFormat, $null) }
-Write-Log -Message "Using date stamp: $todayStamp; date: $($todayDate.ToString('yyyy-MM-dd'))" -Level 'DEBUG'
+# Discover latest confirmation and result
+$latestConfirm = Get-LatestFileMatching -DirectoryPath $ResolvedResponseDir -Filter $ConfirmationSuffixFilter -TimeField $OrderByTimeField
+$latestResult = Get-LatestFileMatching -DirectoryPath $ResolvedResponseDir -Filter $ResultSuffixFilter -TimeField $OrderByTimeField
 
-# 1) If we have a submission response for upload for today then don't run upload again
-$hasTodayUploadResponse = $false
-if ($UploadResponseTodayMode -eq 'NameContainsStamp') {
-    $hasTodayUploadResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedUploadRespDir -Stamp $todayStamp
+$latestConfirmTime = Get-FileTimeValue -FileInfo $latestConfirm -TimeField $OrderByTimeField
+$latestResultTime = Get-FileTimeValue -FileInfo $latestResult -TimeField $OrderByTimeField
+
+Write-Log -Message ("Latest confirm: " + ($latestConfirm?.Name ?? '<none>') + " @ " + ($latestConfirmTime?.ToString('yyyy-MM-dd HH:mm:ss') ?? 'n/a')) -Level 'DEBUG'
+Write-Log -Message ("Latest result:  " + ($latestResult?.Name ?? '<none>') + " @ " + ($latestResultTime?.ToString('yyyy-MM-dd HH:mm:ss') ?? 'n/a')) -Level 'DEBUG'
+
+# Determine actions
+$hasTransmissionFile = $false
+if (Test-Path -Path $ResolvedTransmitDir) {
+    $hasTransmissionFile = [bool](Get-ChildItem -Path $ResolvedTransmitDir -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+# Upload gating: if the latest thing is a confirmation newer than any result, we're waiting; skip upload
+$waitingForResult = $false
+if ($latestConfirmTime -ne $null -and ($latestResultTime -eq $null -or $latestConfirmTime -ge $latestResultTime)) {
+    $waitingForResult = $true
+}
+
+if ($waitingForResult) {
+    Write-Log -Message "Latest confirmation is newer than any result. Waiting for results; skipping upload."
 }
 else {
-    $hasTodayUploadResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedUploadRespDir -TodayDate $todayDate -Filter $UploadResponseExtFilter -MinSizeBytes $UploadResponseMinSizeBytesForTodayMatch -MaxSizeBytes $UploadResponseMaxSizeBytesForTodayMatch -TimeField $TodayMatchTimeField
+    if ($hasTransmissionFile) {
+        Write-Log -Message "No pending confirmation without result. Upload is allowed; attempting upload..."
+        $uploadOk = Invoke-EligibilityUpload -TransmitPath $ResolvedTransmitDir -UploadResponsePath $ResolvedUploadRespDir -CommandLine $UploadCommand
+        if ($uploadOk) { Write-Log -Message "Upload step completed successfully." }
+        else { Write-Log -Message "Upload step failed." -Level 'WARN' }
+    }
+    else {
+        Write-Log -Message "No transmission file exists. Skipping upload."
+    }
 }
 
-if ($hasTodayUploadResponse) {
-    Write-Log -Message "Found today's upload submission response. Skipping upload."
-}
-else {
-    Write-Log -Message "No upload submission response for today. Attempting upload..."
-    $uploadOk = Invoke-EligibilityUpload -TransmitPath $ResolvedTransmitDir -UploadResponsePath $ResolvedUploadRespDir -CommandLine $UploadCommand
-    if ($uploadOk) { Write-Log -Message "Upload step completed successfully." }
-    else { Write-Log -Message "Upload step failed." -Level 'WARN' }
-}
-
-# 2) If we have file response for today's submission, don't download
-$hasTodayFileResponse = $false
-if ($ResponseTodayMode -eq 'NameContainsStamp') {
-    $hasTodayFileResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedResponseDir -Stamp $todayStamp
-}
-else {
-    $hasTodayFileResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedResponseDir -TodayDate $todayDate -Filter $ResponseExtFilter -MinSizeBytes $ResponseMinSizeBytesForTodayMatch -MaxSizeBytes $ResponseMaxSizeBytesForTodayMatch -TimeField $TodayMatchTimeField
+# Download gating: if we already have a result that is at least as new as confirmation, skip download
+$shouldSkipDownload = $false
+if ($latestResultTime -ne $null -and ($latestConfirmTime -eq $null -or $latestResultTime -ge $latestConfirmTime)) {
+    $shouldSkipDownload = $true
 }
 
 $downloadSucceeded = $false
-
-if ($hasTodayFileResponse) {
-    Write-Log -Message "Found today's response file. Skipping download."
+if ($shouldSkipDownload) {
+    Write-Log -Message "Latest result is present and not older than confirmation. Skipping download."
 }
 else {
-    # 3) Else if a transmission file exists try to run the download
-    $hasTransmissionFile = $false
-    if (Test-Path -Path $ResolvedTransmitDir) {
-        $hasTransmissionFile = [bool](Get-ChildItem -Path $ResolvedTransmitDir -File -ErrorAction SilentlyContinue | Select-Object -First 1)
-    }
-
     if ($hasTransmissionFile) {
-        Write-Log -Message "No today's response found. Transmission file exists; attempting download..."
+        Write-Log -Message "No latest result for the latest confirmation. Attempting download..."
         $downloadSucceeded = Invoke-EligibilityDownload -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir -CommandLine $DownloadCommand
         if ($downloadSucceeded) {
             Write-Log -Message "Download step completed successfully."
@@ -287,10 +259,15 @@ else {
     }
 }
 
-# 4) On successful response download, move all files (except today's transmit and response) to completed
+# Archival: after a successful download, archive everything except the latest confirm, latest result, and newest transmit file
 if ($downloadSucceeded) {
     try {
-        Move-OldFilesToCompleted -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir -CompletedPath $ResolvedCompletedDir -TodayStamp $todayStamp -TodayDate $todayDate
+        $keep = New-Object 'System.Collections.Generic.HashSet[string]'
+        $newestTransmit = Get-LatestFileMatching -DirectoryPath $ResolvedTransmitDir -Filter '*' -TimeField $OrderByTimeField
+        if ($newestTransmit) { $null = $keep.Add($newestTransmit.FullName) }
+        if ($latestConfirm) { $null = $keep.Add($latestConfirm.FullName) }
+        if ($latestResult) { $null = $keep.Add($latestResult.FullName) }
+        Move-OldFilesToCompleted -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir -CompletedPath $ResolvedCompletedDir -KeepFullPaths $keep
     }
     catch {
         Write-Log -Message ("Archival failed: " + $_.Exception.Message) -Level 'ERROR'
