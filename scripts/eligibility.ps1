@@ -11,7 +11,24 @@ param(
     [Parameter(Mandatory = $false)] [string]$DateFormat = "yyyyMMdd",
 
     # Allows testing for a specific date (e.g., '20250104'). When empty, uses today.
-    [Parameter(Mandatory = $false)] [string]$TodayOverride = ""
+    [Parameter(Mandatory = $false)] [string]$TodayOverride = "",
+
+    # External commands to run for upload and download (e.g., paths to .bat files). Optional.
+    [Parameter(Mandatory = $false)] [string]$UploadCommand = "",
+    [Parameter(Mandatory = $false)] [string]$DownloadCommand = "",
+
+    # Optional command to run after a successful download (e.g., your CSV copy step)
+    [Parameter(Mandatory = $false)] [string]$PostDownloadCommand = "",
+
+    # Detection modes for today's files: NameContainsStamp or CreatedDate
+    [Parameter(Mandatory = $false)] [ValidateSet('NameContainsStamp','CreatedDate')] [string]$ResponseTodayMode = 'NameContainsStamp',
+    [Parameter(Mandatory = $false)] [ValidateSet('NameContainsStamp','CreatedDate')] [string]$UploadResponseTodayMode = 'NameContainsStamp',
+
+    # Filters when using CreatedDate mode
+    [Parameter(Mandatory = $false)] [string]$ResponseExtFilter = '*.x12',
+    [Parameter(Mandatory = $false)] [Nullable[long]]$ResponseMaxSizeBytesForTodayMatch = $null,
+    [Parameter(Mandatory = $false)] [string]$UploadResponseExtFilter = '*',
+    [Parameter(Mandatory = $false)] [Nullable[long]]$UploadResponseMaxSizeBytesForTodayMatch = $null
 )
 
 Set-StrictMode -Version Latest
@@ -60,17 +77,47 @@ function Test-HasFileWithStamp {
     return [bool]$match
 }
 
+function Test-HasTodayFileByCreatedDate {
+    [CmdletBinding()] param(
+        [Parameter(Mandatory = $true)] [string]$DirectoryPath,
+        [Parameter(Mandatory = $true)] [datetime]$TodayDate,
+        [Parameter(Mandatory = $false)] [string]$Filter = '*',
+        [Parameter(Mandatory = $false)] [Nullable[long]]$MaxSizeBytes = $null
+    )
+    if (-not (Test-Path -Path $DirectoryPath)) { return $false }
+    $files = Get-ChildItem -Path $DirectoryPath -File -Filter $Filter -ErrorAction SilentlyContinue |
+        Where-Object { $_.CreationTime.Date -eq $TodayDate.Date }
+    if ($MaxSizeBytes -ne $null) {
+        $files = $files | Where-Object { $_.Length -le $MaxSizeBytes }
+    }
+    return [bool]($files | Select-Object -First 1)
+}
+
+function Invoke-ExternalCommandViaCmd {
+    [CmdletBinding()] param(
+        [Parameter(Mandatory = $true)] [string]$CommandLine
+    )
+    Write-Log -Message "Executing: $CommandLine" -Level 'DEBUG'
+    $proc = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $CommandLine) -Wait -PassThru -WindowStyle Hidden
+    return ($proc.ExitCode -eq 0)
+}
+
 function Invoke-EligibilityUpload {
     [CmdletBinding()] param(
         [Parameter(Mandatory = $true)] [string]$TransmitPath,
-        [Parameter(Mandatory = $true)] [string]$UploadResponsePath
+        [Parameter(Mandatory = $true)] [string]$UploadResponsePath,
+        [Parameter(Mandatory = $false)] [string]$CommandLine
     )
     try {
-        # TODO: Implement actual upload command here. Example placeholder:
-        # & someUploader --input $TransmitPath --out $UploadResponsePath --non-interactive
-        Write-Log -Message "Running upload step (placeholder)." -Level 'DEBUG'
-        # Simulate success for now
-        return $true
+        if (-not [string]::IsNullOrWhiteSpace($CommandLine)) {
+            Write-Log -Message "Running upload command."
+            $ok = Invoke-ExternalCommandViaCmd -CommandLine $CommandLine
+            return $ok
+        }
+        else {
+            Write-Log -Message "No UploadCommand provided. Skipping upload step." -Level 'WARN'
+            return $true
+        }
     }
     catch {
         Write-Log -Message ("Upload failed: " + $_.Exception.Message) -Level 'ERROR'
@@ -81,14 +128,19 @@ function Invoke-EligibilityUpload {
 function Invoke-EligibilityDownload {
     [CmdletBinding()] param(
         [Parameter(Mandatory = $true)] [string]$TransmitPath,
-        [Parameter(Mandatory = $true)] [string]$ResponsePath
+        [Parameter(Mandatory = $true)] [string]$ResponsePath,
+        [Parameter(Mandatory = $false)] [string]$CommandLine
     )
     try {
-        # TODO: Implement actual download command here. Example placeholder:
-        # & someDownloader --transmit $TransmitPath --out $ResponsePath --non-interactive
-        Write-Log -Message "Running download step (placeholder)." -Level 'DEBUG'
-        # Simulate success for now
-        return $true
+        if (-not [string]::IsNullOrWhiteSpace($CommandLine)) {
+            Write-Log -Message "Running download command."
+            $ok = Invoke-ExternalCommandViaCmd -CommandLine $CommandLine
+            return $ok
+        }
+        else {
+            Write-Log -Message "No DownloadCommand provided. Skipping download step." -Level 'WARN'
+            return $false
+        }
     }
     catch {
         Write-Log -Message ("Download failed: " + $_.Exception.Message) -Level 'ERROR'
@@ -101,7 +153,8 @@ function Move-OldFilesToCompleted {
         [Parameter(Mandatory = $true)] [string]$TransmitPath,
         [Parameter(Mandatory = $true)] [string]$ResponsePath,
         [Parameter(Mandatory = $true)] [string]$CompletedPath,
-        [Parameter(Mandatory = $true)] [string]$TodayStamp
+        [Parameter(Mandatory = $true)] [string]$TodayStamp,
+        [Parameter(Mandatory = $true)] [datetime]$TodayDate
     )
 
     # Create a dated archive folder under completed
@@ -116,7 +169,7 @@ function Move-OldFilesToCompleted {
 
     if (Test-Path -Path $TransmitPath) {
         $toArchiveTx = Get-ChildItem -Path $TransmitPath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike "*${TodayStamp}*" }
+            Where-Object { ($_.Name -notlike "*${TodayStamp}*") -and ($_.CreationTime.Date -ne $TodayDate.Date) }
         foreach ($file in $toArchiveTx) {
             $dest = Join-Path $archiveTransmit $file.Name
             Move-Item -Path $file.FullName -Destination $dest -Force
@@ -126,7 +179,7 @@ function Move-OldFilesToCompleted {
 
     if (Test-Path -Path $ResponsePath) {
         $toArchiveResp = Get-ChildItem -Path $ResponsePath -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike "*${TodayStamp}*" }
+            Where-Object { ($_.Name -notlike "*${TodayStamp}*") -and ($_.CreationTime.Date -ne $TodayDate.Date) }
         foreach ($file in $toArchiveResp) {
             $dest = Join-Path $archiveResponse $file.Name
             Move-Item -Path $file.FullName -Destination $dest -Force
@@ -155,22 +208,37 @@ $script:LogFile = Join-Path $ResolvedLogDir ("eligibility_" + (Get-Date -Format 
 Write-Log -Message "Starting eligibility run. Root: $RootDir"
 
 $todayStamp = Get-TodayStamp -Format $DateFormat -Override $TodayOverride
-Write-Log -Message "Using date stamp: $todayStamp" -Level 'DEBUG'
+$todayDate = if ([string]::IsNullOrWhiteSpace($TodayOverride)) { Get-Date } else { [datetime]::ParseExact($TodayOverride, $DateFormat, $null) }
+Write-Log -Message "Using date stamp: $todayStamp; date: $($todayDate.ToString('yyyy-MM-dd'))" -Level 'DEBUG'
 
 # 1) If we have a submission response for upload for today then don't run upload again
-$hasTodayUploadResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedUploadRespDir -Stamp $todayStamp
+$hasTodayUploadResponse = $false
+if ($UploadResponseTodayMode -eq 'NameContainsStamp') {
+    $hasTodayUploadResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedUploadRespDir -Stamp $todayStamp
+}
+else {
+    $hasTodayUploadResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedUploadRespDir -TodayDate $todayDate -Filter $UploadResponseExtFilter -MaxSizeBytes $UploadResponseMaxSizeBytesForTodayMatch
+}
+
 if ($hasTodayUploadResponse) {
     Write-Log -Message "Found today's upload submission response. Skipping upload."
 }
 else {
     Write-Log -Message "No upload submission response for today. Attempting upload..."
-    $uploadOk = Invoke-EligibilityUpload -TransmitPath $ResolvedTransmitDir -UploadResponsePath $ResolvedUploadRespDir
+    $uploadOk = Invoke-EligibilityUpload -TransmitPath $ResolvedTransmitDir -UploadResponsePath $ResolvedUploadRespDir -CommandLine $UploadCommand
     if ($uploadOk) { Write-Log -Message "Upload step completed successfully." }
     else { Write-Log -Message "Upload step failed." -Level 'WARN' }
 }
 
 # 2) If we have file response for today's submission, don't download
-$hasTodayFileResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedResponseDir -Stamp $todayStamp
+$hasTodayFileResponse = $false
+if ($ResponseTodayMode -eq 'NameContainsStamp') {
+    $hasTodayFileResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedResponseDir -Stamp $todayStamp
+}
+else {
+    $hasTodayFileResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedResponseDir -TodayDate $todayDate -Filter $ResponseExtFilter -MaxSizeBytes $ResponseMaxSizeBytesForTodayMatch
+}
+
 $downloadSucceeded = $false
 
 if ($hasTodayFileResponse) {
@@ -185,9 +253,15 @@ else {
 
     if ($hasTransmissionFile) {
         Write-Log -Message "No today's response found. Transmission file exists; attempting download..."
-        $downloadSucceeded = Invoke-EligibilityDownload -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir
+        $downloadSucceeded = Invoke-EligibilityDownload -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir -CommandLine $DownloadCommand
         if ($downloadSucceeded) {
             Write-Log -Message "Download step completed successfully."
+            if (-not [string]::IsNullOrWhiteSpace($PostDownloadCommand)) {
+                Write-Log -Message "Running post-download command..."
+                $postOk = Invoke-ExternalCommandViaCmd -CommandLine $PostDownloadCommand
+                if ($postOk) { Write-Log -Message "Post-download command completed successfully." }
+                else { Write-Log -Message "Post-download command failed." -Level 'WARN' }
+            }
         }
         else {
             Write-Log -Message "Download step failed." -Level 'WARN'
@@ -201,7 +275,7 @@ else {
 # 4) On successful response download, move all files (except today's transmit and response) to completed
 if ($downloadSucceeded) {
     try {
-        Move-OldFilesToCompleted -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir -CompletedPath $ResolvedCompletedDir -TodayStamp $todayStamp
+        Move-OldFilesToCompleted -TransmitPath $ResolvedTransmitDir -ResponsePath $ResolvedResponseDir -CompletedPath $ResolvedCompletedDir -TodayStamp $todayStamp -TodayDate $todayDate
     }
     catch {
         Write-Log -Message ("Archival failed: " + $_.Exception.Message) -Level 'ERROR'
