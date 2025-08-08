@@ -19,7 +19,8 @@ if errorlevel 1 (
 set ROOT=C:\SOLJEN
 set TX_DIR=Transmit
 set RESPONSE_DIR=Response
-set UPLOAD_RESP_DIR=UploadResponses
+:: Use the same directory for upload submission responses
+set UPLOAD_RESP_DIR=%RESPONSE_DIR%
 set COMPLETED_DIR=Completed
 set LOG_DIR=Logs
 
@@ -46,7 +47,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%PS_SCRIPT%" ^
   -LogDir "%LOG_DIR%" ^
   -ResponseTodayMode CreatedDate ^
   -ResponseExtFilter "*.x12" ^
-  -ResponseMaxSizeBytesForTodayMatch 2048 ^
+  -ResponseMinSizeBytesForTodayMatch 2049 ^
+  -UploadResponseTodayMode CreatedDate ^
+  -UploadResponseExtFilter "*.x12" ^
+  -UploadResponseMaxSizeBytesForTodayMatch 2048 ^
   -DownloadCommand "'%DOWNLOAD_CMD%'" ^
   -PostDownloadCommand "'%POST_CMD%'"
 
