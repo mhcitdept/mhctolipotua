@@ -24,6 +24,9 @@ param(
     [Parameter(Mandatory = $false)] [ValidateSet('NameContainsStamp','CreatedDate')] [string]$ResponseTodayMode = 'NameContainsStamp',
     [Parameter(Mandatory = $false)] [ValidateSet('NameContainsStamp','CreatedDate')] [string]$UploadResponseTodayMode = 'NameContainsStamp',
 
+    # When using CreatedDate mode, choose which timestamp field to use
+    [Parameter(Mandatory = $false)] [ValidateSet('CreationTime','LastWriteTime')] [string]$TodayMatchTimeField = 'CreationTime',
+
     # Filters when using CreatedDate mode
     [Parameter(Mandatory = $false)] [string]$ResponseExtFilter = '*.x12',
     [Parameter(Mandatory = $false)] [Nullable[long]]$ResponseMinSizeBytesForTodayMatch = $null,
@@ -85,11 +88,17 @@ function Test-HasTodayFileByCreatedDate {
         [Parameter(Mandatory = $true)] [datetime]$TodayDate,
         [Parameter(Mandatory = $false)] [string]$Filter = '*',
         [Parameter(Mandatory = $false)] [Nullable[long]]$MinSizeBytes = $null,
-        [Parameter(Mandatory = $false)] [Nullable[long]]$MaxSizeBytes = $null
+        [Parameter(Mandatory = $false)] [Nullable[long]]$MaxSizeBytes = $null,
+        [Parameter(Mandatory = $false)] [ValidateSet('CreationTime','LastWriteTime')] [string]$TimeField = 'CreationTime'
     )
     if (-not (Test-Path -Path $DirectoryPath)) { return $false }
-    $files = Get-ChildItem -Path $DirectoryPath -File -Filter $Filter -ErrorAction SilentlyContinue |
-        Where-Object { $_.CreationTime.Date -eq $TodayDate.Date }
+    $files = Get-ChildItem -Path $DirectoryPath -File -Filter $Filter -ErrorAction SilentlyContinue
+    if ($TimeField -eq 'LastWriteTime') {
+        $files = $files | Where-Object { $_.LastWriteTime.Date -eq $TodayDate.Date }
+    }
+    else {
+        $files = $files | Where-Object { $_.CreationTime.Date -eq $TodayDate.Date }
+    }
     if ($MinSizeBytes -ne $null) {
         $files = $files | Where-Object { $_.Length -ge $MinSizeBytes }
     }
@@ -223,7 +232,7 @@ if ($UploadResponseTodayMode -eq 'NameContainsStamp') {
     $hasTodayUploadResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedUploadRespDir -Stamp $todayStamp
 }
 else {
-    $hasTodayUploadResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedUploadRespDir -TodayDate $todayDate -Filter $UploadResponseExtFilter -MinSizeBytes $UploadResponseMinSizeBytesForTodayMatch -MaxSizeBytes $UploadResponseMaxSizeBytesForTodayMatch
+    $hasTodayUploadResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedUploadRespDir -TodayDate $todayDate -Filter $UploadResponseExtFilter -MinSizeBytes $UploadResponseMinSizeBytesForTodayMatch -MaxSizeBytes $UploadResponseMaxSizeBytesForTodayMatch -TimeField $TodayMatchTimeField
 }
 
 if ($hasTodayUploadResponse) {
@@ -242,7 +251,7 @@ if ($ResponseTodayMode -eq 'NameContainsStamp') {
     $hasTodayFileResponse = Test-HasFileWithStamp -DirectoryPath $ResolvedResponseDir -Stamp $todayStamp
 }
 else {
-    $hasTodayFileResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedResponseDir -TodayDate $todayDate -Filter $ResponseExtFilter -MinSizeBytes $ResponseMinSizeBytesForTodayMatch -MaxSizeBytes $ResponseMaxSizeBytesForTodayMatch
+    $hasTodayFileResponse = Test-HasTodayFileByCreatedDate -DirectoryPath $ResolvedResponseDir -TodayDate $todayDate -Filter $ResponseExtFilter -MinSizeBytes $ResponseMinSizeBytesForTodayMatch -MaxSizeBytes $ResponseMaxSizeBytesForTodayMatch -TimeField $TodayMatchTimeField
 }
 
 $downloadSucceeded = $false
